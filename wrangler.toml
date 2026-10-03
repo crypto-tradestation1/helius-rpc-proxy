@@ -1,9 +1,9 @@
 name = "rpc-proxy"
 main = "./src/index.ts"
 compatibility_date = "2025-09-23"
-"routes": [
+routes = [
 {
-"pattern": "sapphireunotrade.com/api/*",
-"zone_name": "sapphireunotrade.com"
+pattern = "sapphireunotrade.com/api/*",
+zone_name = "sapphireunotrade.com"
 }
 ]
