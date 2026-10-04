@@ -127,10 +127,10 @@ var index_default = {
     const isBase64Route =
       pathname.startsWith("/r/") ||
       pathname.startsWith("/api/r/") ||
-      pathname.startsWith("/api/base64encode/") ||
-      pathname.startsWith("/api/decode/") ||
+      pathname.startsWith("/api/data/") ||
+      pathname.startsWith("/api/decode") ||
       urlObj.searchParams.has("base64") ||
-      urlObj.searchParams.has("r");
+      urlObj.searchParams.has("data");
 
     if (isBase64Route) {
       let rawPayload = "";
@@ -141,10 +141,10 @@ var index_default = {
         rawPayload = pathname.slice(3);
       } else if (pathname.startsWith("/api/base64encode/")) {
         rawPayload = pathname.slice(18);
-      } else if (pathname.startsWith("/api/decode/")) {
+      } else if (pathname.startsWith("/api/decode")) {
         rawPayload = pathname.slice(12);
       } else {
-        rawPayload = urlObj.searchParams.get("base64") || urlObj.searchParams.get("r") || "";
+        rawPayload = urlObj.searchParams.get("data") || urlObj.searchParams.get("r") || "";
       }
 
       if (!rawPayload && (request.method === "POST" || request.method === "PUT")) {
